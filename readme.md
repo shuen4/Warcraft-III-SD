@@ -23,7 +23,7 @@ This repository is used to download Warcraft III: Reforged(with only SD files) f
 ## Note
 1. CDN server is hardcoded as `level3.blizzard.com`
     - almost every file downloaded from this server, changing it to nearest CDN might improve download speed
-      - you can change it in source code or `nginx/conf/nginx.conf` after proxy server running and use `nginx.exe -s reload` to reload nginx config
+      - you can change it in source code or `nginx/conf/nginx.conf` when proxy server running and use `nginx.exe -s reload` to reload nginx config
         - list of cdn servers:
           - us.cdn.blizzard.com
           - eu.cdn.blizzard.com
@@ -43,12 +43,13 @@ This repository is used to download Warcraft III: Reforged(with only SD files) f
       - these are "more hardcoded" than any previous, changing any of them application will no longer works
 
 ## Game note
-1. First launch take a little time, for game to download missing files that required for main menu (~1 min)
+1. First launch take a little time, for game to download missing files that required for main menu
 2. According to my tests, playing with fully downloaded game does not have any issue
 3. Battle.net online playing is not tested, use at your own risk
 4. The game will download missing file when required, and freeze while downloading
 5. CASC tag broken, but seem not having any side effect
 6. You might want to disable auto update as well
+7. Make sure you are using classic graphic option
 
 ## Special thanks
 - [nginx](https://nginx.org) for reverse proxy backend
