@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34622.214
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Warcraft III SD", "Warcraft III SD\Warcraft III SD.vcxproj", "{4965C823-9C2A-4336-891C-538F6F581B26}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{4965C823-9C2A-4336-891C-538F6F581B26}.Debug|x64.ActiveCfg = Debug|x64
+		{4965C823-9C2A-4336-891C-538F6F581B26}.Debug|x64.Build.0 = Debug|x64
+		{4965C823-9C2A-4336-891C-538F6F581B26}.Release|x64.ActiveCfg = Release|x64
+		{4965C823-9C2A-4336-891C-538F6F581B26}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {5F1979C7-755A-4D69-921E-63CF12CA981F}
+	EndGlobalSection
+EndGlobal
