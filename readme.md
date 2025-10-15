@@ -2,7 +2,7 @@ This repository is used to download Warcraft III: Reforged(with only SD files) f
 
 ## Prerequisites
 1. Battle.net application
-2. UAC(or equivalent) to modify `C:\Windows\System32\drivers\etc\hosts`
+2. UAC(or equivalent) to modify `C:\Windows\System32\drivers\etc\hosts` and windows certificate store
 
 ## Clear cache
 1. Close Battle.net application and make sure Agent.exe not running
@@ -18,7 +18,9 @@ This repository is used to download Warcraft III: Reforged(with only SD files) f
 5. After `Initializing`, you should see 6.2GB size (for 1.36.1.21015)
 6. Wait until download complete, switch back application's console, then press CTRL + C to shutdown
     - do not use window close button as it does not preform cleanup
-      - if you accidentally close via close button, you can find backup of hosts file in `backup` folder and manual replace it
+      - if you accidentally close via close button:
+        - you can find backup of hosts file in `backup` folder and manual replace it to `C:\Windows\System32\drivers\etc\hosts`
+        - and remove self signed certificate from windows certificate store
 
 ## Note
 1. CDN server is hardcoded as `level3.blizzard.com`
@@ -34,7 +36,7 @@ This repository is used to download Warcraft III: Reforged(with only SD files) f
           - blzddist1-a.akamaihd.net
           - blzddistkr1-a.akamaihd.net
           - blizzard.gcdn.cloudn.co.kr
-2. PATCH server is hardcoded as `us.patch.battle.net`
+2. PATCH server is hardcoded as `us.patch.battle.net` and VERSION_HOST server is hardcoded as `us.version.battle.net`
     - very less file are downloaded from this server, changing it does not have much impact
 3. PRODUCT is hardcoded as `w3`
 4. CDN PATH is hardcoded as `tpr/war3`
@@ -47,9 +49,10 @@ This repository is used to download Warcraft III: Reforged(with only SD files) f
 2. According to my tests, playing with fully downloaded game does not have any issue
 3. Battle.net online playing is not tested, use at your own risk
 4. The game will download missing file when required, and freeze while downloading
-5. CASC tag broken, but seem not having any side effect
+5. CASC tag broken, but seem not having any side effect (it seem CASCLib not able to load it for now)
 6. You might want to disable auto update as well
 7. Make sure you are using classic graphic option
+8. And if possible, always use command line `-launch` to start the game
 
 ## Special thanks
 - [nginx](https://nginx.org) for reverse proxy backend
