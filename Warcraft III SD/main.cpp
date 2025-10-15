@@ -16,6 +16,7 @@
 // parsable from PATCH_HTTP/PRODUCT/cdns
 #define CDN_HOST "level3.blizzard.com"
 #define CDN_HTTP "http://level3.blizzard.com"
+#define VERSION_HOST "us.version.battle.net"
 #define PATH "tpr/war3"
 
 class CArchiveIndex {
@@ -200,6 +201,7 @@ int main() {
 
     // extract necessary info from cdn config
     std::vector<std::string> archive_list;
+    std::vector<uint32_t> archive_index_size;
     std::string archive_group_hash;
     std::vector<uint8_t> cdn_config_bin;
     std::string file_index;
@@ -227,6 +229,16 @@ int main() {
                         line.erase(line.begin());
                 }
             }
+            else if (string_start_with(line, "archives-index-size = ")) {
+                line.erase(line.begin(), line.begin() + sizeof("archives-index-size = ") - 1);
+                while (line.size()) {
+                    auto s = line.substr(0, line.find(" "));
+                    archive_index_size.push_back(stoul(s));
+                    line.erase(line.begin(), line.begin() + s.size());
+                    if (line.size() > 0)
+                        line.erase(line.begin());
+                }
+            }
             else if (string_start_with(line, "file-index = ")) {
                 file_index = line.substr(13, CHECKSUM_SIZE * 2);
             }
@@ -241,6 +253,14 @@ int main() {
     }
     if (archive_group_hash.empty()) {
         Log.error("could not find archive group from cdn config");
+        return 1;
+    }
+    if (archive_list.empty()) {
+        Log.error("could not find archive from cdn config");
+        return 1;
+    }
+    if (archive_list.size() != archive_index_size.size()) {
+        Log.error("archive and archive-index-size count missmatch");
         return 1;
     }
 
@@ -554,7 +574,7 @@ int main() {
         }
     }
 
-    // delete archive path starting with "War3.w3mod:_HD.w3mod:" from download entry
+    // filter out unwanted files from download entry
     download_entry.erase(std::remove_if(download_entry.begin(), download_entry.end(), [&ekey_to_ckey, &ckey_to_archive_path](CDownloadEntry entry) {
         std::vector<uint8_t> encoded_key = entry.encoded_key;
         if (ekey_to_ckey.find(encoded_key) == ekey_to_ckey.end()) {
@@ -567,7 +587,12 @@ int main() {
             return false;
         }
         std::string archive_path = ckey_to_archive_path[ekey_to_ckey[encoded_key]];
+        // starting with "War3.w3mod:_HD.w3mod:"
         bool remove = string_start_with(archive_path, "War3.w3mod:_HD.w3mod:");
+        // and starting with "_Addons/HD2.w3addon/"
+        if (!remove)
+            remove = string_start_with(archive_path, "_Addons/HD2.w3addon/");
+
         if (remove)
             Log.info("removing %s\n", archive_path.data());
         return remove;
@@ -685,42 +710,36 @@ int main() {
     std::string new_archive_index = md5((char*)&new_archive_index_data[/* blockSizeKb */4 * 1024 + CHECKSUM_SIZE + /* checksumSize */ 8], 12 + /* checksumSize */ 8 + /* checksumSize */ 8);
     archive_index[new_download_ekey] = CArchiveIndex(md5_string_to_vector(new_download_ekey), new_archive_index, 0, (uint32_t)new_download_data_encoded.size(), (uint32_t)archive_list.size());
     archive_list.push_back(new_archive_index);
+    archive_index_size.push_back((uint32_t)new_archive_index_data.size());
 
     // calc archive group hash
     std::vector<uint8_t> archive_group_data;
     uint32_t numElements = 0;
     std::vector<std::vector<uint8_t>> archive_group_last_ekey;
     std::vector<std::vector<uint8_t>> archive_group_block_md5;
+    CArchiveIndex* last_archive_index = NULL;
     for (auto i = archive_index.begin(); i != archive_index.end(); i++) {
         if (i->second.archive_index == -1) // from file index
             continue;
+        last_archive_index = &i->second;
         numElements++;
+#define SIZE_EACH_INDEX_BLOCK (16 + 4 + 1 + 4)
         archive_group_data.insert(archive_group_data.end(), i->second.ekey.begin(), i->second.ekey.end());
         archive_group_data.push_back((uint8_t)(i->second.size >> 24));
         archive_group_data.push_back((uint8_t)(i->second.size >> 16));
         archive_group_data.push_back((uint8_t)(i->second.size >> 8));
         archive_group_data.push_back((uint8_t)(i->second.size >> 0));
-        archive_group_data.push_back((uint8_t)(i->second.archive_index >> 8));
+        // when it become 1 byte ?
+        // archive_group_data.push_back((uint8_t)(i->second.archive_index >> 8));
         archive_group_data.push_back((uint8_t)(i->second.archive_index >> 0));
         archive_group_data.push_back((uint8_t)(i->second.offset >> 24));
         archive_group_data.push_back((uint8_t)(i->second.offset >> 16));
         archive_group_data.push_back((uint8_t)(i->second.offset >> 8));
         archive_group_data.push_back((uint8_t)(i->second.offset >> 0));
-        if (archive_group_data.size() % (/* blockSizeKb */4 * 1024) == 0xFF2) {
-            archive_group_data.push_back(0); // padding
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
-            archive_group_data.push_back(0);
+        if (archive_group_data.size() % (/* blockSizeKb */4 * 1024) == (/* blockSizeKb */4 * 1024) / SIZE_EACH_INDEX_BLOCK * SIZE_EACH_INDEX_BLOCK) {
+            // padding
+            if (archive_group_data.size() % (/* blockSizeKb */4 * 1024))
+                archive_group_data.insert(archive_group_data.end(), (/* blockSizeKb */4 * 1024) - (archive_group_data.size() % (/* blockSizeKb */4 * 1024)), 0);
             archive_group_last_ekey.push_back(i->second.ekey);
             size_t page_start = (archive_group_data.size() / (/* blockSizeKb */4 * 1024) - 1) * /* blockSizeKb */4 * 1024;
             std::string page_md5_string = md5((char*)&archive_group_data[page_start], /* blockSizeKb */4 * 1024);
@@ -732,12 +751,9 @@ int main() {
     size_t page_end = ((archive_group_data.size() + (/* blockSizeKb */4 * 1024) - 1) / (/* blockSizeKb */4 * 1024)) * (/* blockSizeKb */4 * 1024);
     if (page_end != archive_group_data.size()) {
         archive_group_data.resize(page_end, 0); // padding
-        for (auto i = archive_index.rbegin(); i != archive_index.rend(); i++) {
-            if (i->second.archive_index == -1) // from file index
-                continue;
-            archive_group_last_ekey.push_back(i->second.ekey);
-            break;
-        }
+        if (!last_archive_index)
+            Log.error("assert failed (%d)", __LINE__);
+        archive_group_last_ekey.push_back(last_archive_index->ekey);
         size_t page_start = (archive_group_data.size() / (/* blockSizeKb */4 * 1024) - 1) * /* blockSizeKb */4 * 1024;
         std::string page_md5_string = md5((char*)&archive_group_data[page_start], /* blockSizeKb */4 * 1024);
         std::vector<uint8_t> page_md5 = md5_string_to_vector(page_md5_string);
@@ -759,7 +775,8 @@ int main() {
     footer_data.push_back(0);
     footer_data.push_back(0);
     footer_data.push_back(4);
-    footer_data.push_back(6); // offsetBytes archive group index is 6
+    // footer_data.push_back(6); // offsetBytes archive group index is 6
+    footer_data.push_back(5); // when it become 5 ?
     footer_data.push_back(4);
     footer_data.push_back(16);
     footer_data.push_back(8);
@@ -817,8 +834,13 @@ int main() {
         }
         else if (string_start_with(line, "archive-group = "))
             new_cdn_config_data += "archive-group = " + new_archive_group_hash + "\n";
-        else if (string_start_with(line, "archives-index-size = "))
-            new_cdn_config_data += line + " " + std::to_string(new_archive_index_data.size()) + "\n";
+        else if (string_start_with(line, "archives-index-size = ")) {
+            new_cdn_config_data += "archives-index-size = ";
+            for (size_t i = 0; i < archive_index_size.size(); i++)
+                new_cdn_config_data += std::to_string(archive_index_size[i]) + " ";
+            new_cdn_config_data.resize(new_cdn_config_data.size() - 1); // delete last space
+            new_cdn_config_data += "\n";
+        }
         else
             new_cdn_config_data += line + "\n";
     }
@@ -863,12 +885,17 @@ int main() {
     // write nginx proxy config
     std::string cdn_ip = nslookup(CDN_HOST);
     std::string patch_ip = nslookup(PATCH_HOST);
+    std::string version_ip = nslookup(VERSION_HOST);
     if (cdn_ip.empty()) {
         Log.error("failed to get " CDN_HOST " ip");
         return 1;
     }
     if (patch_ip.empty()) {
         Log.error("failed to get " PATCH_HOST " ip");
+        return 1;
+    }
+    if (version_ip.empty()) {
+        Log.error("failed to get " VERSION_HOST " ip");
         return 1;
     }
     std::string nginx_config_data = "worker_processes  1;\n";
@@ -880,7 +907,7 @@ int main() {
     nginx_config_data += "http {\n";
     nginx_config_data += "    server {\n";
     nginx_config_data += "        location / {\n";
-    nginx_config_data += "            proxy_set_header Host level3.blizzard.com;\n";
+    nginx_config_data += "            proxy_set_header Host " CDN_HOST ";\n";
     nginx_config_data += "            proxy_pass http://" + cdn_ip +"/;\n";
     nginx_config_data += "        }\n";
     nginx_config_data += "        location /" PATH "/config/" + new_build_config.substr(0, 2) + "/" + new_build_config.substr(2, 2) + "/" + new_build_config + " {\n";
@@ -902,6 +929,18 @@ int main() {
     nginx_config_data += "            proxy_pass http://" + patch_ip + ":1119/;\n";
     nginx_config_data += "        }\n";
     nginx_config_data += "        location /" PRODUCT "/versions {\n";
+    nginx_config_data += "            root html;\n";
+    nginx_config_data += "        }\n";
+    nginx_config_data += "    }\n";
+    nginx_config_data += "    server {\n";
+    nginx_config_data += "        listen 443 ssl;\n";
+    nginx_config_data += "        ssl_certificate version.battle.net.crt;\n";
+    nginx_config_data += "        ssl_certificate_key version.battle.net.key;\n";
+    nginx_config_data += "        location / {\n";
+    nginx_config_data += "            proxy_set_header Host " VERSION_HOST ";\n";
+    nginx_config_data += "            proxy_pass https://" + version_ip + ":443/;\n";
+    nginx_config_data += "        }\n";
+    nginx_config_data += "        location /v2/products/" PRODUCT "/versions {\n";
     nginx_config_data += "            root html;\n";
     nginx_config_data += "        }\n";
     nginx_config_data += "    }\n";
@@ -960,6 +999,15 @@ int main() {
         Log.error("failed to save new versions %s\n", file_path.c_str());
         return 1;
     }
+    // versions V2
+    file_path = "nginx/html/v2/products/" PRODUCT;
+    system(std::string("mkdir \"" + file_path + "\"").c_str());
+    file_path.append(1, '/');
+    file_path += "versions";
+    if (!write_file(file_path, new_versions_data_bin)) {
+        Log.error("failed to save new versions(V2) %s\n", file_path.c_str());
+        return 1;
+    }
     // hosts file
     if (!write_file("C:\\Windows\\System32\\drivers\\etc\\hosts", new_hosts_data_bin)) {
         Log.error("failed to save new system hosts C:\\Windows\\System32\\drivers\\etc\\hosts\n");
@@ -970,6 +1018,9 @@ int main() {
         Log.error("failed to save nginx config nginx/conf/nginx.conf\n");
         return 1;
     }
+
+    // add self signed cert to trust root
+    system("certutil.exe -addstore root nginx\\conf\\version.battle.net.crt");
 
     // start nginx server
     system("start /d nginx nginx.exe");
@@ -982,6 +1033,9 @@ int main() {
         Log.warn("wait for singal failed");
     else
         Log.info("received exit signal, exiting\n");
+
+    // remove self signed cert from trust root
+    system("certutil.exe -delstore root \"Warcraft III SD local proxy server\"");
 
     // shutdown nginx server
     system("start /wait /d nginx nginx.exe -s stop");
