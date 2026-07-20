@@ -49,10 +49,9 @@ This repository is used to download Warcraft III: Reforged(with only SD files) f
 2. According to my tests, playing with fully downloaded game does not have any issue
 3. Battle.net online playing is not tested, use at your own risk
 4. The game will download missing file when required, and freeze while downloading
-5. CASC tag broken, but seem not having any side effect (it seem CASCLib not able to load it for now)
-6. You might want to disable auto update as well
-7. Make sure you are using classic graphic option
-8. And if possible, always use command line `-launch` to start the game
+5. You might want to disable auto update as well
+6. Make sure you are using classic graphic option
+7. And if possible, always use command line `-launch` to start the game
 
 ## Special thanks
 - [nginx](https://nginx.org) for reverse proxy backend
