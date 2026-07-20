@@ -15,18 +15,19 @@ public:
     template<class t>
     std::vector<t> ReadVector(uint32_t count) {
         std::vector<t> ret;
-        ret.resize(count);
-        for (uint32_t i = 0; i < count; i++) {
-            ret[i] = Read<t>();
-        }
+        ret.reserve(count);
+        ret.insert(ret.end(), &data[0] + curPos, &data[0] + curPos + count);
+        curPos += count;
         return ret;
     }
     std::string ReadString(int length = -1) {
         std::string ret;
         if (length == -1)
             ret = std::string((char*)&data[0] + curPos);
-        else
-            ret = std::string((char*)&data[0] + curPos, length);
+        else {
+            ret.reserve(length);
+            ret.append((char*)&data[0] + curPos, length);
+        }
         curPos += ret.size() + 1;
         return ret;
     }

@@ -3,6 +3,7 @@
 #include <map>
 #include <chrono>
 #include <ctime>   
+#include <assert.h>   
 #include "file.h"
 #include "reader.h"
 #include "http.h"
@@ -31,6 +32,9 @@ public:
 };
 class CDownloadEntry {
 public:
+#ifdef _DEBUG
+    std::string filename;
+#endif
     std::vector<uint8_t> encoded_key;
     std::vector<std::string> tag;
     uint64_t file_size;
@@ -427,21 +431,38 @@ int main() {
     reader.curPos += 2; // EKeySpecPageTable_page_size_kb
     uint32_t CEKey_page_count = reader.Read<uint32_t>();
     reverse(CEKey_page_count);
-    reader.curPos += 4; // EKeySpec_count
-    reader.curPos += 1; // asserted 0 by agent
+    uint32_t EKeySpec_count = reader.Read<uint32_t>();
+    reverse(EKeySpec_count);
+    {
+        auto zero = reader.Read<uint8_t>();
+        assert(zero == 0);
+    }
     uint32_t ESpec_block_size = reader.Read<uint32_t>();
     reverse(ESpec_block_size);
-    reader.curPos += ESpec_block_size;
-    reader.curPos += 0x20 * CEKey_page_count;
+    auto ENCODING_ESpec_block = reader.ReadVector<uint8_t>(ESpec_block_size);
+    reader.curPos += 0x20 * CEKey_page_count; // skip all page index (and its checksum), will recreate later
     size_t page_start = reader.curPos;
+    struct CEKEY {
+        CEKEY() :file_size(0), ekey() {};
+        uint64_t file_size; // uint40, big endian
+        std::vector<std::vector<uint8_t>> ekey;
+    };
+    std::map<std::vector<uint8_t>, CEKEY> ENCODING_cekey_entry;
     for (uint32_t i = 0; i < CEKey_page_count; i++) {
         while (true) {
             uint8_t ekey_count = reader.Read<uint8_t>();
-            if (ekey_count == 0)
+            if (ekey_count == 0) // page padding, or terminator
                 break;
 
-            reader.curPos += 5; // file_size
+            uint8_t file_size_hi = reader.Read<uint8_t>();
+            uint32_t file_size_lo = reader.Read<uint32_t>();
+            reverse(file_size_lo);
+            uint64_t file_size = (uint64_t)file_size_lo | (uint64_t)file_size_hi << 32;
             std::vector<uint8_t> content_key = reader.ReadVector<uint8_t>(16);
+
+            auto& entry = ENCODING_cekey_entry[content_key];
+            entry.file_size = file_size;
+
             for (uint32_t i1 = 0; i1 < ekey_count; i1++) {
                 std::vector<uint8_t> encoded_key = reader.ReadVector<uint8_t>(16);
                 if (content_key == root_ckey_vec)
@@ -449,11 +470,16 @@ int main() {
                 if (content_key == download_ckey_vec)
                     download_ekey = vector_to_hex_string(encoded_key);
                 ekey_to_ckey[encoded_key] = content_key;
+
+                entry.ekey.push_back(encoded_key);
             }
         }
         page_start += CEKey_page_size;
         reader.curPos = page_start;
     }
+    // used to reconstruct ENCODING, luckily we dont need to modify it
+    std::vector<uint8_t> ENCODING_EKeySpecPageTable = reader.ReadVector<uint8_t>(reader.data.size() - reader.curPos);
+    // there is a ESpec at EOF, whos know whats it is used to
 
     // read root
     std::map<std::vector<uint8_t>, std::string> ckey_to_archive_path;
@@ -563,19 +589,18 @@ int main() {
         uint16_t type = reader.Read<uint16_t>(); // 1 = locale, 2 = platform, 3 = release channel
         reverse(type);
         download_entry_tag.push_back(CTag(name, type));
-        std::vector<uint8_t> tag_bit;
         for (uint32_t i1 = 0; i1 < bit_size; i1++) {
             uint8_t bit = reader.Read<uint8_t>();
-            tag_bit.push_back(bit);
             for (uint32_t i2 = 0; i2 < 8; i2++)
-                if (bit & 1 << i2)
+                if (bit & 1 << (7 - i2)) {
                     if (i1 * 8 + i2 < download_entry.size())
                         download_entry[i1 * 8 + i2].tag.push_back(name);
+                }
         }
     }
 
     // filter out unwanted files from download entry
-    download_entry.erase(std::remove_if(download_entry.begin(), download_entry.end(), [&ekey_to_ckey, &ckey_to_archive_path](CDownloadEntry entry) {
+    download_entry.erase(std::remove_if(download_entry.begin(), download_entry.end(), [&ekey_to_ckey, &ckey_to_archive_path](CDownloadEntry& entry) {
         std::vector<uint8_t> encoded_key = entry.encoded_key;
         if (ekey_to_ckey.find(encoded_key) == ekey_to_ckey.end()) {
             Log.warn("ekey_to_ckey failed.\n");
@@ -587,14 +612,26 @@ int main() {
             return false;
         }
         std::string archive_path = ckey_to_archive_path[ekey_to_ckey[encoded_key]];
-        // starting with "War3.w3mod:_HD.w3mod:"
-        bool remove = string_start_with(archive_path, "War3.w3mod:_HD.w3mod:");
+#ifdef _DEBUG
+        entry.filename = archive_path;
+#endif
+
+        bool remove =
+#ifdef _DEBUG
+            // remove every thing except x86_64
+            !string_start_with(archive_path, "x86_64/") &&
+            archive_path != "War3.w3mod:CustomKeys.txt"; // test DOWNLOAD tag
+#else
+            // starting with "War3.w3mod:_HD.w3mod:"
+            string_start_with(archive_path, "War3.w3mod:_HD.w3mod:");
         // and starting with "_Addons/HD2.w3addon/"
         if (!remove)
             remove = string_start_with(archive_path, "_Addons/HD2.w3addon/");
 
         if (remove)
             Log.info("removing %s\n", archive_path.data());
+#endif
+
         return remove;
     }), download_entry.end());
 
@@ -634,7 +671,7 @@ int main() {
                 if (download_entry[i1].tag[i2] == download_entry_tag[i].name) {
                     uint32_t array_index = i1 / 8;
                     uint32_t bit_index = i1 % 8;
-                    tag_bit[array_index] |= 1 << bit_index;
+                    tag_bit[array_index] |= (1 << (7 - bit_index));
                     break;
                 }
             }
@@ -643,7 +680,7 @@ int main() {
         for (uint32_t i1 = (uint32_t)download_entry.size(); i1 < bit_count * 8; i1++) {
             uint32_t array_index = i1 / 8;
             uint32_t bit_index = i1 % 8;
-            tag_bit[array_index] |= 1 << bit_index;
+            tag_bit[array_index] |= (1 << (7 - bit_index));
         }
         new_download_data.insert(new_download_data.end(), tag_bit, tag_bit + bit_count);
         delete[] tag_bit;
@@ -651,6 +688,7 @@ int main() {
 
     // calc modified download ckey and ekey
     std::string new_download_ckey = md5((char*)&new_download_data[0], (long)new_download_data.size());
+    auto new_download_ckey_vec = md5_string_to_vector(new_download_ckey);
     std::vector<uint8_t> new_download_data_encoded;
     BLTE_encode(new_download_data, new_download_data_encoded); // never fail
     std::string new_download_ekey;
@@ -712,6 +750,167 @@ int main() {
     archive_list.push_back(new_archive_index);
     archive_index_size.push_back((uint32_t)new_archive_index_data.size());
 
+    // add generated DOWNLOAD CEKey to ENCODING
+    {
+        auto& entry = ENCODING_cekey_entry[new_download_ckey_vec];
+        entry.file_size = new_download_data.size();
+        entry.ekey.push_back(new_download_ekey_vec);
+    }
+    // generate new ENCODING
+    std::vector<uint8_t> new_ENCODING_data;
+    new_ENCODING_data.reserve(encoding_data.size() + 4096); // add 1 page
+    // header, "EN"
+    new_ENCODING_data.push_back('E');
+    new_ENCODING_data.push_back('N');
+    // version, 1
+    new_ENCODING_data.push_back(1);
+    // ckey size, 16
+    new_ENCODING_data.push_back(CHECKSUM_SIZE);
+    // ekey size, 16
+    new_ENCODING_data.push_back(CHECKSUM_SIZE);
+    // CEKey_page_size, big endian, 4kb (fixed, instead of dynamic)
+    new_ENCODING_data.push_back(0);
+    new_ENCODING_data.push_back(4);
+    // EKeySpec_page_size, big endian, 4kb (fixed, instead of dynamic)
+    new_ENCODING_data.push_back(0);
+    new_ENCODING_data.push_back(4);
+    // CEKey page count, placeholder, at 0x9
+    new_ENCODING_data.push_back(0); // 0x9
+    new_ENCODING_data.push_back(0); // 0xA
+    new_ENCODING_data.push_back(0); // 0xB
+    new_ENCODING_data.push_back(0); // 0xC
+    // EKeySpec page count
+    new_ENCODING_data.push_back((uint8_t)(EKeySpec_count >> 24));
+    new_ENCODING_data.push_back((uint8_t)(EKeySpec_count >> 16));
+    new_ENCODING_data.push_back((uint8_t)(EKeySpec_count >> 8));
+    new_ENCODING_data.push_back((uint8_t)(EKeySpec_count >> 0));
+    // flag, zero
+    new_ENCODING_data.push_back(0);
+    // ESpec size, big endian
+    new_ENCODING_data.push_back((uint8_t)(ENCODING_ESpec_block.size() >> 24));
+    new_ENCODING_data.push_back((uint8_t)(ENCODING_ESpec_block.size() >> 16));
+    new_ENCODING_data.push_back((uint8_t)(ENCODING_ESpec_block.size() >> 8));
+    new_ENCODING_data.push_back((uint8_t)(ENCODING_ESpec_block.size() >> 0));
+    // ESpec data
+    new_ENCODING_data.insert(new_ENCODING_data.end(), ENCODING_ESpec_block.begin(), ENCODING_ESpec_block.end());
+    // CE key table
+    {
+        std::vector<std::vector<uint8_t>> table_data;
+        // CE key table
+        for (auto& entry : ENCODING_cekey_entry) {
+            assert(entry.second.ekey.size());
+            std::vector<uint8_t> d;
+            // ekey count
+            d.push_back(entry.second.ekey.size());
+            // file size, big endian
+            d.push_back((uint8_t)(entry.second.file_size >> 32));
+            d.push_back((uint8_t)(entry.second.file_size >> 24));
+            d.push_back((uint8_t)(entry.second.file_size >> 16));
+            d.push_back((uint8_t)(entry.second.file_size >> 8));
+            d.push_back((uint8_t)(entry.second.file_size >> 0));
+            // ckey
+            d.insert(d.end(), entry.first.begin(), entry.first.end());
+            // ekey(s)
+            for (auto& ekey : entry.second.ekey)
+                d.insert(d.end(), ekey.begin(), ekey.end());
+            assert(d.size() < 4096);
+
+            if (table_data.empty() || table_data.back().size() + d.size() > 4096) {
+                // add new page
+                table_data.push_back(d);
+            }
+            else {
+                // add to current page
+                table_data.back().insert(table_data.back().end(), d.begin(), d.end());
+            }
+        }
+        std::vector<uint8_t> table_index;
+        table_index.reserve(table_data.size() * CHECKSUM_SIZE * 2);
+        for (auto& entry : table_data) {
+            entry.resize(4096); // padding
+            // ckey
+            table_index.insert(table_index.end(), entry.begin() + 6, entry.begin() + 6 + CHECKSUM_SIZE);
+            // page md5
+            auto page_md5 = md5((char*)entry.data(), entry.size());
+            auto page_md5_hex = md5_string_to_vector(page_md5);
+            table_index.insert(table_index.end(), page_md5_hex.begin(), page_md5_hex.end());
+        }
+        // table index
+        new_ENCODING_data.insert(new_ENCODING_data.end(), table_index.begin(), table_index.end());
+        // table data
+        for (auto& entry : table_data)
+            new_ENCODING_data.insert(new_ENCODING_data.end(), entry.begin(), entry.end());
+
+        new_ENCODING_data.at(0x9) = (uint8_t)((table_index.size() / (CHECKSUM_SIZE * 2)) >> 24);
+        new_ENCODING_data.at(0xA) = (uint8_t)((table_index.size() / (CHECKSUM_SIZE * 2)) >> 16);
+        new_ENCODING_data.at(0xB) = (uint8_t)((table_index.size() / (CHECKSUM_SIZE * 2)) >> 8);
+        new_ENCODING_data.at(0xC) = (uint8_t)((table_index.size() / (CHECKSUM_SIZE * 2)) >> 0);
+    }
+    // EKey spec table
+    new_ENCODING_data.insert(new_ENCODING_data.end(), ENCODING_EKeySpecPageTable.begin(), ENCODING_EKeySpecPageTable.end());
+    // a unknown usage of ESpec included in ENCODING_EKeySpecPageTable
+
+    std::string new_ENCODING_ckey = md5((char*)&new_ENCODING_data[0], (long)new_ENCODING_data.size());
+    std::vector<uint8_t> new_ENCODING_data_encoded;
+    BLTE_encode(new_ENCODING_data, new_ENCODING_data_encoded);
+    std::string new_ENCODING_ekey;
+    if (!BLTE_md5(new_ENCODING_data_encoded, new_ENCODING_ekey)) {
+        Log.error("Failed to calc BLTE checksum\n");
+        return 1;
+    }
+
+    // add modified ENCODING to archive too
+    std::vector<uint8_t> new_archive_index_data_ENCODING;
+    std::vector<uint8_t> new_ENCODING_ekey_vec = md5_string_to_vector(new_ENCODING_ekey);
+    new_archive_index_data_ENCODING.insert(new_archive_index_data_ENCODING.end(), new_ENCODING_ekey_vec.begin(), new_ENCODING_ekey_vec.end());
+    new_archive_index_data_ENCODING.push_back((uint8_t)(new_ENCODING_data_encoded.size() >> 24));
+    new_archive_index_data_ENCODING.push_back((uint8_t)(new_ENCODING_data_encoded.size() >> 16));
+    new_archive_index_data_ENCODING.push_back((uint8_t)(new_ENCODING_data_encoded.size() >> 8));
+    new_archive_index_data_ENCODING.push_back((uint8_t)(new_ENCODING_data_encoded.size() >> 0));
+    new_archive_index_data_ENCODING.push_back(0); // size
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.resize(/* blockSizeKb */4 * 1024);
+    new_archive_index_data_ENCODING.insert(new_archive_index_data_ENCODING.end(), new_ENCODING_ekey_vec.begin(), new_ENCODING_ekey_vec.end()); // last ekey
+    last_block_md5_string = md5((char*)&new_archive_index_data_ENCODING[0], /* blockSizeKb */4 * 1024);
+    last_block_md5 = md5_string_to_vector(last_block_md5_string);
+    last_block_md5.resize(/* checksumSize */ 8);
+    new_archive_index_data_ENCODING.insert(new_archive_index_data_ENCODING.end(), last_block_md5.begin(), last_block_md5.end());
+    toc_md5_string = md5((char*)&new_archive_index_data_ENCODING[/* blockSizeKb */4 * 1024], CHECKSUM_SIZE + /* checksumSize */ 8);
+    toc_md5 = md5_string_to_vector(toc_md5_string);
+    toc_md5.resize(/* checksumSize */ 8);
+    new_archive_index_data_ENCODING.insert(new_archive_index_data_ENCODING.end(), toc_md5.begin(), toc_md5.end());
+    new_archive_index_data_ENCODING.push_back(1);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(4);
+    new_archive_index_data_ENCODING.push_back(4);
+    new_archive_index_data_ENCODING.push_back(4);
+    new_archive_index_data_ENCODING.push_back(16);
+    new_archive_index_data_ENCODING.push_back(8);
+    new_archive_index_data_ENCODING.push_back(1); // entry count
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0); // footer md5
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    new_archive_index_data_ENCODING.push_back(0);
+    footer_md5_string = md5((char*)&new_archive_index_data_ENCODING[/* blockSizeKb */4 * 1024 + CHECKSUM_SIZE + /* checksumSize */ 8 + /* checksumSize */ 8], 12 + /* checksumSize */ 8);
+    footer_md5 = md5_string_to_vector(footer_md5_string);
+    footer_md5.resize(/* checksumSize */ 8);
+    new_archive_index_data_ENCODING.resize(new_archive_index_data_ENCODING.size() - /* checksumSize */ 8);
+    new_archive_index_data_ENCODING.insert(new_archive_index_data_ENCODING.end(), footer_md5.begin(), footer_md5.end());
+    auto new_archive_index_ENCODING = md5((char*)&new_archive_index_data_ENCODING[/* blockSizeKb */4 * 1024 + CHECKSUM_SIZE + /* checksumSize */ 8], 12 + /* checksumSize */ 8 + /* checksumSize */ 8);
+    archive_index[new_ENCODING_ekey] = CArchiveIndex(md5_string_to_vector(new_ENCODING_ekey), new_archive_index_ENCODING, 0, (uint32_t)new_ENCODING_data_encoded.size(), (uint32_t)archive_list.size());
+    archive_list.push_back(new_archive_index_ENCODING);
+    archive_index_size.push_back((uint32_t)new_archive_index_data_ENCODING.size());
+
     // calc archive group hash
     std::vector<uint8_t> archive_group_data;
     uint32_t numElements = 0;
@@ -751,8 +950,7 @@ int main() {
     size_t page_end = ((archive_group_data.size() + (/* blockSizeKb */4 * 1024) - 1) / (/* blockSizeKb */4 * 1024)) * (/* blockSizeKb */4 * 1024);
     if (page_end != archive_group_data.size()) {
         archive_group_data.resize(page_end, 0); // padding
-        if (!last_archive_index)
-            Log.error("assert failed (%d)", __LINE__);
+        assert(last_archive_index);
         archive_group_last_ekey.push_back(last_archive_index->ekey);
         size_t page_start = (archive_group_data.size() / (/* blockSizeKb */4 * 1024) - 1) * /* blockSizeKb */4 * 1024;
         std::string page_md5_string = md5((char*)&archive_group_data[page_start], /* blockSizeKb */4 * 1024);
@@ -813,6 +1011,12 @@ int main() {
         else if (string_start_with(line, "download-size = ")) {
             new_build_config_data += "download-size = " + std::to_string(new_download_data.size()) + " " + std::to_string(new_download_data_encoded.size()) + "\n";
         }
+        else if (string_start_with(line, "encoding = ")) {
+            new_build_config_data += "encoding = " + new_ENCODING_ckey + " " + new_ENCODING_ekey + "\n";
+        }
+        else if (string_start_with(line, "encoding-size = ")) {
+            new_build_config_data += "encoding-size = " + std::to_string(new_ENCODING_data.size()) + " " + std::to_string(new_ENCODING_data_encoded.size()) + "\n";
+        }
         else
             new_build_config_data += line + "\n";
     }
@@ -857,29 +1061,29 @@ int main() {
     // some hostname doesnt exist but whatever
     std::string new_hosts_data = hosts_data;
     new_hosts_data += "\n"; // incase file not end with newline
-    new_hosts_data += "127.0.0.1 blizzard.gcdn.cloudn.co.kr\n";
-    new_hosts_data += "127.0.0.1 blzddist1-a.akamaihd.net\n";
-    new_hosts_data += "127.0.0.1 blzddistkr1-a.akamaihd.net\n";
-    new_hosts_data += "127.0.0.1 level3.ssl.blizzard.com\n";
-    new_hosts_data += "127.0.0.1 level3.blizzard.com\n";
-    new_hosts_data += "127.0.0.1 us.cdn.blizzard.com\n";
-    new_hosts_data += "127.0.0.1 eu.cdn.blizzard.com\n";
-    new_hosts_data += "127.0.0.1 cn.cdn.blizzard.com\n";
-    new_hosts_data += "127.0.0.1 tw.cdn.blizzard.com\n";
-    new_hosts_data += "127.0.0.1 kr.cdn.blizzard.com\n";
-    new_hosts_data += "127.0.0.1 sg.cdn.blizzard.com\n";
-    new_hosts_data += "127.0.0.1 us.patch.battle.net\n";
-    new_hosts_data += "127.0.0.1 eu.patch.battle.net\n";
-    new_hosts_data += "127.0.0.1 cn.patch.battle.net\n";
-    new_hosts_data += "127.0.0.1 tw.patch.battle.net\n";
-    new_hosts_data += "127.0.0.1 kr.patch.battle.net\n";
-    new_hosts_data += "127.0.0.1 sg.patch.battle.net\n";
-    new_hosts_data += "127.0.0.1 us.version.battle.net\n";
-    new_hosts_data += "127.0.0.1 eu.version.battle.net\n";
-    new_hosts_data += "127.0.0.1 cn.version.battle.net\n";
-    new_hosts_data += "127.0.0.1 tw.version.battle.net\n";
-    new_hosts_data += "127.0.0.1 kr.version.battle.net\n";
-    new_hosts_data += "127.0.0.1 sg.version.battle.net\n";
+    new_hosts_data += "127.2.2.2 blizzard.gcdn.cloudn.co.kr\n";
+    new_hosts_data += "127.2.2.2 blzddist1-a.akamaihd.net\n";
+    new_hosts_data += "127.2.2.2 blzddistkr1-a.akamaihd.net\n";
+    new_hosts_data += "127.2.2.2 level3.ssl.blizzard.com\n";
+    new_hosts_data += "127.2.2.2 level3.blizzard.com\n";
+    new_hosts_data += "127.2.2.2 us.cdn.blizzard.com\n";
+    new_hosts_data += "127.2.2.2 eu.cdn.blizzard.com\n";
+    new_hosts_data += "127.2.2.2 cn.cdn.blizzard.com\n";
+    new_hosts_data += "127.2.2.2 tw.cdn.blizzard.com\n";
+    new_hosts_data += "127.2.2.2 kr.cdn.blizzard.com\n";
+    new_hosts_data += "127.2.2.2 sg.cdn.blizzard.com\n";
+    new_hosts_data += "127.2.2.2 us.patch.battle.net\n";
+    new_hosts_data += "127.2.2.2 eu.patch.battle.net\n";
+    new_hosts_data += "127.2.2.2 cn.patch.battle.net\n";
+    new_hosts_data += "127.2.2.2 tw.patch.battle.net\n";
+    new_hosts_data += "127.2.2.2 kr.patch.battle.net\n";
+    new_hosts_data += "127.2.2.2 sg.patch.battle.net\n";
+    new_hosts_data += "127.2.2.2 us.version.battle.net\n";
+    new_hosts_data += "127.2.2.2 eu.version.battle.net\n";
+    new_hosts_data += "127.2.2.2 cn.version.battle.net\n";
+    new_hosts_data += "127.2.2.2 tw.version.battle.net\n";
+    new_hosts_data += "127.2.2.2 kr.version.battle.net\n";
+    new_hosts_data += "127.2.2.2 sg.version.battle.net\n";
     std::vector<uint8_t> new_hosts_data_bin(new_hosts_data.begin(), new_hosts_data.end());
 
     // write nginx proxy config
@@ -922,9 +1126,21 @@ int main() {
     nginx_config_data += "        location /" PATH "/data/" + new_archive_index.substr(0, 2) + "/" + new_archive_index.substr(2, 2) + "/" + new_archive_index + ".index {\n";
     nginx_config_data += "            root html;\n";
     nginx_config_data += "        }\n";
+    nginx_config_data += "        location /" PATH "/data/" + new_download_ekey.substr(0, 2) + "/" + new_download_ekey.substr(2, 2) + "/" + new_download_ekey + " {\n";
+    nginx_config_data += "            root html;\n";
+    nginx_config_data += "        }\n";
+    nginx_config_data += "        location /" PATH "/data/" + new_archive_index_ENCODING.substr(0, 2) + "/" + new_archive_index_ENCODING.substr(2, 2) + "/" + new_archive_index_ENCODING + " {\n";
+    nginx_config_data += "            root html;\n";
+    nginx_config_data += "        }\n";
+    nginx_config_data += "        location /" PATH "/data/" + new_archive_index_ENCODING.substr(0, 2) + "/" + new_archive_index_ENCODING.substr(2, 2) + "/" + new_archive_index_ENCODING + ".index {\n";
+    nginx_config_data += "            root html;\n";
+    nginx_config_data += "        }\n";
+    nginx_config_data += "        location /" PATH "/data/" + new_ENCODING_ekey.substr(0, 2) + "/" + new_ENCODING_ekey.substr(2, 2) + "/" + new_ENCODING_ekey + " {\n";
+    nginx_config_data += "            root html;\n";
+    nginx_config_data += "        }\n";
     nginx_config_data += "    }\n";
     nginx_config_data += "    server {\n";
-    nginx_config_data += "        listen 1119;\n";
+    nginx_config_data += "        listen 127.2.2.2:1119;\n";
     nginx_config_data += "        location / {\n";
     nginx_config_data += "            proxy_pass http://" + patch_ip + ":1119/;\n";
     nginx_config_data += "        }\n";
@@ -933,7 +1149,7 @@ int main() {
     nginx_config_data += "        }\n";
     nginx_config_data += "    }\n";
     nginx_config_data += "    server {\n";
-    nginx_config_data += "        listen 443 ssl;\n";
+    nginx_config_data += "        listen 127.2.2.2:443 ssl;\n";
     nginx_config_data += "        ssl_certificate version.battle.net.crt;\n";
     nginx_config_data += "        ssl_certificate_key version.battle.net.key;\n";
     nginx_config_data += "        location / {\n";
@@ -972,7 +1188,19 @@ int main() {
         Log.error("failed to save new cdn config %s\n", file_path.c_str());
         return 1;
     }
-    // archive
+    // archive (DOWNLOAD, direct access), battle.net use this
+    file_path = "nginx/html/" PATH "/data/";
+    file_path += new_download_ekey.substr(0, 2);
+    file_path.append(1, '/');
+    file_path += new_download_ekey.substr(2, 2);
+    system(std::string("mkdir \"" + file_path + "\"").c_str());
+    file_path.append(1, '/');
+    file_path += new_download_ekey;
+    if (!write_file(file_path, new_download_data_encoded)) {
+        Log.error("failed to save new archive %s\n", file_path.c_str());
+        return 1;
+    }
+    // archive (DOWNLOAD)
     file_path = "nginx/html/" PATH "/data/";
     file_path += new_archive_index.substr(0, 2);
     file_path.append(1, '/');
@@ -984,9 +1212,39 @@ int main() {
         Log.error("failed to save new archive %s\n", file_path.c_str());
         return 1;
     }
-    // archive index
+    // archive index (DOWNLOAD)
     file_path += ".index";
     if (!write_file(file_path, new_archive_index_data)) {
+        Log.error("failed to save new archive index %s\n", file_path.c_str());
+        return 1;
+    }
+    // archive (ENCODING, direct access)
+    file_path = "nginx/html/" PATH "/data/";
+    file_path += new_ENCODING_ekey.substr(0, 2);
+    file_path.append(1, '/');
+    file_path += new_ENCODING_ekey.substr(2, 2);
+    system(std::string("mkdir \"" + file_path + "\"").c_str());
+    file_path.append(1, '/');
+    file_path += new_ENCODING_ekey;
+    if (!write_file(file_path, new_ENCODING_data_encoded)) {
+        Log.error("failed to save new archive %s\n", file_path.c_str());
+        return 1;
+    }
+    // archive (ENCODING), battle.net use this
+    file_path = "nginx/html/" PATH "/data/";
+    file_path += new_archive_index_ENCODING.substr(0, 2);
+    file_path.append(1, '/');
+    file_path += new_archive_index_ENCODING.substr(2, 2);
+    system(std::string("mkdir \"" + file_path + "\"").c_str());
+    file_path.append(1, '/');
+    file_path += new_archive_index_ENCODING;
+    if (!write_file(file_path, new_ENCODING_data_encoded)) {
+        Log.error("failed to save new archive %s\n", file_path.c_str());
+        return 1;
+    }
+    // archive index (ENCODING)
+    file_path += ".index";
+    if (!write_file(file_path, new_archive_index_data_ENCODING)) {
         Log.error("failed to save new archive index %s\n", file_path.c_str());
         return 1;
     }
